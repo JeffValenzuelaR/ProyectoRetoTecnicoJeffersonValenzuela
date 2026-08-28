@@ -1,0 +1,25 @@
+# .NET
+bin/
+obj/
+*.user
+
+# Node / frontend
+node_modules/
+dist/
+build/
+
+# Config local
+.env
+*.local
+
+# IDEs
+.vs/
+.idea/
+*.suo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

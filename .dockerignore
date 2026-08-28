@@ -1,0 +1,11 @@
+**/bin/
+**/obj/
+
+frontend/
+docs/
+backlog/
+db/
+.git/
+.idea/
+*.md
+docker-compose.yml

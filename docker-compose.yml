@@ -1,0 +1,111 @@
+name: plataforma-eventos
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: eventos-postgres
+    environment:
+      POSTGRES_USER: eventuser
+      POSTGRES_PASSWORD: eventpass
+      POSTGRES_DB: eventdb
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./db/init-event-service.sql:/docker-entrypoint-initdb.d/init-event-service.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eventuser -d eventdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mongo:
+    image: mongo:7
+    container_name: eventos-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+      - ./db/init-mongo.js:/docker-entrypoint-initdb.d/init-mongo.js:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: eventos-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: eventos-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    container_name: eventos-mailhog
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+  api-event:
+    build:
+      context: .
+      dockerfile: event-service/EventService.Api/Dockerfile
+    container_name: eventos-api-event
+    ports:
+      - "8090:8080"
+    environment:
+      ConnectionStrings__Postgres: "Host=postgres;Port=5432;Database=eventdb;Username=eventuser;Password=eventpass"
+      RabbitMq__Host: rabbitmq
+      RabbitMq__Username: guest
+      RabbitMq__Password: guest
+      Redis__Connection: "redis:6379"
+      Cors__AllowedOrigins__0: "http://localhost:5173"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  api-notifications:
+    build:
+      context: .
+      dockerfile: notification-service/NotificationService.Api/Dockerfile
+    container_name: eventos-api-notifications
+    ports:
+      - "8091:8080"
+    environment:
+      MongoDb__ConnectionString: "mongodb://mongo:27017"
+      MongoDb__Database: notificationdb
+      RabbitMq__Host: rabbitmq
+      RabbitMq__Username: guest
+      RabbitMq__Password: guest
+      Smtp__Host: mailhog
+      Smtp__Port: "1025"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  mongo-data:

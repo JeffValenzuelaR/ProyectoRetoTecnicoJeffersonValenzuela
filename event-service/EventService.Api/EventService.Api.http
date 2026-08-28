@@ -1,0 +1,31 @@
+@host = http://localhost:8090
+
+# 1. Token de prueba
+POST {{host}}/auth/token
+Content-Type: application/json
+
+{ "username": "admin", "role": "Admin" }
+
+###
+
+# 2. Crear evento (pegar el accessToken de la respuesta anterior)
+POST {{host}}/events
+Content-Type: application/json
+Authorization: Bearer PEGAR_TOKEN
+
+{
+  "name": "Evento de prueba",
+  "date": "2026-12-15T20:00:00Z",
+  "venue": "Estadio Nacional",
+  "zones": [
+    { "name": "General", "price": 80, "capacity": 5000 }
+  ]
+}
+
+###
+
+# 3. Listar
+GET {{host}}/events
+Authorization: Bearer PEGAR_TOKEN
+
+###
