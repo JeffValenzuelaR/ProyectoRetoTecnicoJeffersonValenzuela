@@ -1,0 +1,400 @@
+{
+  "info": {
+    "name": "Plataforma de Eventos - E2E",
+    "description": "Colección completa: EventService (8090) + NotificationService (8091) + helpers de RabbitMQ (15672) y MailHog (8025).\n\nOrden sugerido:\n1. Auth > Token (Admin)  -> guarda {{accessToken}}\n1. Auth > Token (User)   -> guarda {{userToken}}\n2. Events (happy path)   -> crea y guarda {{eventId}}\n3. Events (negativos)    -> 401 / 403 / 400 / 404\n4. Notifications         -> lista jobs y guarda {{messageId}} + {{replayEventId}}\n5. Idempotencia          -> republica el mismo EventCreated a RabbitMQ; luego re-corré Notifications y MailHog: NO deben cambiar\n6. Verificar (MailHog)\n7. Health & Docs\n\nRequisito: el stack levantado (docker compose up -d).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "eventHost", "value": "http://localhost:8090" },
+    { "key": "notifHost", "value": "http://localhost:8091" },
+    { "key": "rabbitHost", "value": "http://localhost:15672" },
+    { "key": "mailhogHost", "value": "http://localhost:8025" },
+    { "key": "rabbitUser", "value": "guest" },
+    { "key": "rabbitPass", "value": "guest" },
+    { "key": "accessToken", "value": "" },
+    { "key": "userToken", "value": "" },
+    { "key": "eventId", "value": "" },
+    { "key": "messageId", "value": "" },
+    { "key": "replayEventId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "1. Auth",
+      "item": [
+        {
+          "name": "Token (Admin)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.collectionVariables.set('accessToken', j.accessToken);",
+                  "pm.collectionVariables.set('tokenExpiresAt', j.expiresAt);",
+                  "pm.test('trae accessToken', () => pm.expect(j.accessToken).to.be.a('string').and.not.empty);",
+                  "console.log('accessToken guardado, expira', j.expiresAt);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "body": { "mode": "raw", "raw": "{\n  \"username\": \"admin\",\n  \"role\": \"Admin\"\n}" },
+            "url": { "raw": "{{eventHost}}/auth/token", "host": [ "{{eventHost}}" ], "path": [ "auth", "token" ] }
+          }
+        },
+        {
+          "name": "Token (User - rol sin permisos)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.collectionVariables.set('userToken', pm.response.json().accessToken);",
+                  "console.log('userToken guardado');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "body": { "mode": "raw", "raw": "{\n  \"username\": \"viewer\",\n  \"role\": \"User\"\n}" },
+            "url": { "raw": "{{eventHost}}/auth/token", "host": [ "{{eventHost}}" ], "path": [ "auth", "token" ] }
+          }
+        },
+        {
+          "name": "Token invalido (falta role) -> 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 400', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "body": { "mode": "raw", "raw": "{\n  \"username\": \"x\",\n  \"role\": \"\"\n}" },
+            "url": { "raw": "{{eventHost}}/auth/token", "host": [ "{{eventHost}}" ], "path": [ "auth", "token" ] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Events (happy path)",
+      "item": [
+        {
+          "name": "Crear evento -> 201",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "const j = pm.response.json();",
+                  "pm.collectionVariables.set('eventId', j.id);",
+                  "pm.test('status del evento = Draft', () => pm.expect(j.status).to.eql('Draft'));",
+                  "pm.test('trae 2 zonas', () => pm.expect(j.zones).to.have.lengthOf(2));",
+                  "console.log('eventId guardado:', j.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "auth": { "type": "bearer", "bearer": [ { "key": "token", "value": "{{accessToken}}", "type": "string" } ] },
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Evento Postman\",\n  \"date\": \"2026-12-15T20:00:00Z\",\n  \"venue\": \"Estadio Nacional\",\n  \"zones\": [\n    { \"name\": \"VIP\", \"price\": 250, \"capacity\": 200 },\n    { \"name\": \"General\", \"price\": 80, \"capacity\": 5000 }\n  ]\n}" },
+            "url": { "raw": "{{eventHost}}/events", "host": [ "{{eventHost}}" ], "path": [ "events" ] }
+          }
+        },
+        {
+          "name": "Listar eventos (Redis cache) -> 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('es un array', () => pm.expect(pm.response.json()).to.be.an('array'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "auth": { "type": "bearer", "bearer": [ { "key": "token", "value": "{{accessToken}}", "type": "string" } ] },
+            "url": { "raw": "{{eventHost}}/events", "host": [ "{{eventHost}}" ], "path": [ "events" ] }
+          }
+        },
+        {
+          "name": "Obtener evento por id -> 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('id coincide', () => pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('eventId')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "auth": { "type": "bearer", "bearer": [ { "key": "token", "value": "{{accessToken}}", "type": "string" } ] },
+            "url": { "raw": "{{eventHost}}/events/{{eventId}}", "host": [ "{{eventHost}}" ], "path": [ "events", "{{eventId}}" ] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Events (negativos)",
+      "item": [
+        {
+          "name": "Crear sin token -> 401",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [ "pm.test('status 401', () => pm.response.to.have.status(401));" ] } }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"x\",\n  \"date\": \"2026-12-15T20:00:00Z\",\n  \"venue\": \"x\",\n  \"zones\": [ { \"name\": \"G\", \"price\": 10, \"capacity\": 10 } ]\n}" },
+            "url": { "raw": "{{eventHost}}/events", "host": [ "{{eventHost}}" ], "path": [ "events" ] }
+          }
+        },
+        {
+          "name": "Crear con rol User -> 403",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [ "pm.test('status 403', () => pm.response.to.have.status(403));" ] } }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "auth": { "type": "bearer", "bearer": [ { "key": "token", "value": "{{userToken}}", "type": "string" } ] },
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"x\",\n  \"date\": \"2026-12-15T20:00:00Z\",\n  \"venue\": \"x\",\n  \"zones\": [ { \"name\": \"G\", \"price\": 10, \"capacity\": 10 } ]\n}" },
+            "url": { "raw": "{{eventHost}}/events", "host": [ "{{eventHost}}" ], "path": [ "events" ] }
+          }
+        },
+        {
+          "name": "Crear body invalido -> 400 (FluentValidation)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('trae diccionario errors', () => pm.expect(pm.response.json()).to.have.property('errors'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "auth": { "type": "bearer", "bearer": [ { "key": "token", "value": "{{accessToken}}", "type": "string" } ] },
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"\",\n  \"date\": \"2026-12-15T20:00:00Z\",\n  \"venue\": \"\",\n  \"zones\": []\n}" },
+            "url": { "raw": "{{eventHost}}/events", "host": [ "{{eventHost}}" ], "path": [ "events" ] }
+          }
+        },
+        {
+          "name": "Obtener id inexistente -> 404",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [ "pm.test('status 404', () => pm.response.to.have.status(404));" ] } }
+          ],
+          "request": {
+            "method": "GET",
+            "auth": { "type": "bearer", "bearer": [ { "key": "token", "value": "{{accessToken}}", "type": "string" } ] },
+            "url": { "raw": "{{eventHost}}/events/00000000-0000-0000-0000-000000000000", "host": [ "{{eventHost}}" ], "path": [ "events", "00000000-0000-0000-0000-000000000000" ] }
+          }
+        },
+        {
+          "name": "Rate limit -> 429 (correr con Runner x150)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Ejecutar esta request con el Collection Runner, 150 iteraciones, 0ms de delay.",
+                  "// El limite es 100 req / 10s por IP. A partir de ~100 deberia devolver 429.",
+                  "pm.test('200 o 429', () => pm.expect([200,429]).to.include(pm.response.code));",
+                  "if (pm.response.code === 429) console.log('rate limit alcanzado');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "auth": { "type": "bearer", "bearer": [ { "key": "token", "value": "{{accessToken}}", "type": "string" } ] },
+            "url": { "raw": "{{eventHost}}/events", "host": [ "{{eventHost}}" ], "path": [ "events" ] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Notifications",
+      "item": [
+        {
+          "name": "Listar jobs -> 200 (guarda messageId + replayEventId)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('es un array', () => pm.expect(j).to.be.an('array'));",
+                  "if (Array.isArray(j) && j.length) {",
+                  "  pm.collectionVariables.set('messageId', j[0].messageId);",
+                  "  pm.collectionVariables.set('replayEventId', j[0].eventId);",
+                  "  pm.collectionVariables.set('jobsCount', j.length);",
+                  "  console.log('ultimo job:', j[0].eventName, '| status', j[0].status, '| messageId', j[0].messageId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{notifHost}}/notifications?take=20",
+              "host": [ "{{notifHost}}" ],
+              "path": [ "notifications" ],
+              "query": [ { "key": "take", "value": "20" } ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Idempotencia (replay a RabbitMQ)",
+      "item": [
+        {
+          "name": "Cola: profundidad y consumers",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const q = pm.response.json();",
+                  "console.log('messages:', q.messages, '| consumers:', q.consumers);",
+                  "pm.test('hay 1 consumer', () => pm.expect(q.consumers).to.be.at.least(1));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "auth": { "type": "basic", "basic": [ { "key": "username", "value": "{{rabbitUser}}" }, { "key": "password", "value": "{{rabbitPass}}" } ] },
+            "url": { "raw": "{{rabbitHost}}/api/queues/%2F/notification-event-created", "host": [ "{{rabbitHost}}" ], "path": [ "api", "queues", "%2F", "notification-event-created" ] }
+          }
+        },
+        {
+          "name": "Publicar EventCreated DUPLICADO (mismo messageId)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('routed = true', () => pm.expect(pm.response.json().routed).to.eql(true));",
+                  "console.log('Duplicado publicado. Ahora re-corré \"4. Notifications > Listar jobs\" y \"6. MailHog > Ver correos\": el conteo NO debe cambiar.');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "auth": { "type": "basic", "basic": [ { "key": "username", "value": "{{rabbitUser}}" }, { "key": "password", "value": "{{rabbitPass}}" } ] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"properties\": { \"content_type\": \"application/vnd.masstransit+json\" },\n  \"routing_key\": \"\",\n  \"payload\": \"{\\\"messageType\\\":[\\\"urn:message:Shared.Contracts:EventCreated\\\"],\\\"message\\\":{\\\"messageId\\\":\\\"{{messageId}}\\\",\\\"eventId\\\":\\\"{{replayEventId}}\\\",\\\"name\\\":\\\"replay-idempotencia\\\",\\\"occurredAt\\\":\\\"2026-09-07T13:00:00Z\\\",\\\"correlationId\\\":\\\"{{messageId}}\\\",\\\"version\\\":1}}\",\n  \"payload_encoding\": \"string\"\n}"
+            },
+            "url": { "raw": "{{rabbitHost}}/api/exchanges/%2F/Shared.Contracts:EventCreated/publish", "host": [ "{{rabbitHost}}" ], "path": [ "api", "exchanges", "%2F", "Shared.Contracts:EventCreated", "publish" ] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. MailHog",
+      "item": [
+        {
+          "name": "Ver correos capturados",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json();",
+                  "console.log('total correos:', d.total);",
+                  "d.items.slice(0,5).forEach(m => console.log(' -', (m.Content.Headers.Subject || ['(sin asunto)'])[0]));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{mailhogHost}}/api/v2/messages", "host": [ "{{mailhogHost}}" ], "path": [ "api", "v2", "messages" ] }
+          }
+        },
+        {
+          "name": "Vaciar bandeja",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [ "pm.test('status 200', () => pm.response.to.have.status(200));" ] } }
+          ],
+          "request": {
+            "method": "DELETE",
+            "url": { "raw": "{{mailhogHost}}/api/v1/messages", "host": [ "{{mailhogHost}}" ], "path": [ "api", "v1", "messages" ] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. Health & Docs",
+      "item": [
+        {
+          "name": "EventService /health",
+          "event": [ { "listen": "test", "script": { "type": "text/javascript", "exec": [ "pm.test('status 200', () => pm.response.to.have.status(200));" ] } } ],
+          "request": { "method": "GET", "url": { "raw": "{{eventHost}}/health", "host": [ "{{eventHost}}" ], "path": [ "health" ] } }
+        },
+        {
+          "name": "NotificationService /health",
+          "event": [ { "listen": "test", "script": { "type": "text/javascript", "exec": [ "pm.test('status 200', () => pm.response.to.have.status(200));" ] } } ],
+          "request": { "method": "GET", "url": { "raw": "{{notifHost}}/health", "host": [ "{{notifHost}}" ], "path": [ "health" ] } }
+        },
+        {
+          "name": "EventService swagger.json",
+          "event": [ { "listen": "test", "script": { "type": "text/javascript", "exec": [ "pm.test('status 200', () => pm.response.to.have.status(200));" ] } } ],
+          "request": { "method": "GET", "url": { "raw": "{{eventHost}}/swagger/v1/swagger.json", "host": [ "{{eventHost}}" ], "path": [ "swagger", "v1", "swagger.json" ] } }
+        },
+        {
+          "name": "NotificationService swagger.json",
+          "event": [ { "listen": "test", "script": { "type": "text/javascript", "exec": [ "pm.test('status 200', () => pm.response.to.have.status(200));" ] } } ],
+          "request": { "method": "GET", "url": { "raw": "{{notifHost}}/swagger/v1/swagger.json", "host": [ "{{notifHost}}" ], "path": [ "swagger", "v1", "swagger.json" ] } }
+        }
+      ]
+    }
+  ]
+}
